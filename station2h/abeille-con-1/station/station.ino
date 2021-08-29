@@ -10,7 +10,6 @@
 #include <Adafruit_BME280.h>
 #include <OneWire.h> //For external temperature sensor
 #include <DallasTemperature.h>
-//#include "Adafruit_SI1145.h"
 
 // Replace REPLACE_ME with TTN_FP_EU868 or TTN_FP_US915
 #define freqPlan TTN_FP_US915
@@ -20,19 +19,30 @@ TheThingsNetwork ttn(loraSerial, debugSerial, freqPlan);
 const char *appEui = "70B3D57ED003AAD2";
 const char *appKey = "A8457C53BDF9B05B9D76FB03BD6D0CE2";
 
+
 #define SEALEVELPRESSURE_HPA (1013.25)
 #define PRESSURE_BASE 40000
 
-//**** Define if the station has vis and wind sensors
+  //**** Define if the station has vis and wind sensors
 #define VIS_SENSOR false
 #define WIND_SENSOR true
 
 #define VIS_SENSOR_INTERVAL 61000 //Warm up time MILI SECONDS required by the VIS sensor 
+
+/******************** STATION STATE **************************
+state:
+{
+  sleepTime:txIntervalSleep,
+  inbuildLed:0
+}
 /***** Sleeping time TXT_INTERVAL is multiplied by 8 seconds enterSleep function*/
-//#define TX_INTERVAL_SLEEP 1700 //450*8 = 3600 sec = 60 min
-//For testing
-#define TX_INTERVAL_SLEEP 20 //2*8 =16 sec
-//using CayenneLPP
+//Initiate state
+int contInitialAttemps=0;
+#define INITIAL_ATTEMPS 10
+#define DEFAULT_SLEEP_TEMP 900
+bool intervalSleepChanged=false;
+int txIntervalSleep= 10; //6*8**1000 ms =48 seconds
+int inbuildLed=0;
 
 //For BME280 sensor
 Adafruit_BME280 bme; // I2C
@@ -65,6 +75,10 @@ const int aWindPin=A4;
 const float a=21.01;
 const  float b=-0.1411;
 
+//Download inbuild pin led
+
+
+
 void setup()
 {
   loraSerial.begin(57600);
@@ -95,6 +109,10 @@ void setup()
   ttn.showStatus();
   debugSerial.println("-- JOIN");
   ttn.join(appEui, appKey);
+  
+  //****Callback to receive downlink
+  //used to update the status of the device. 
+  ttn.onMessage(message);
 
   //INIT BME SENSOR
   // default settings
@@ -105,7 +123,7 @@ void setup()
     }
     debugSerial.println("-- Default Test --");
     debugSerial.println();
-    sensors_1.begin();   //INIT UV SENSOR
+    sensors_1.begin(); 
     sensors_2.begin();
     delay(1000);
     Serial.println("OK!");
@@ -141,8 +159,8 @@ void loop()
   uint32_t battery=getBattery()*100;
   debugSerial.print("Battery: ");
   debugSerial.println(battery);
-
-  byte payload[12];   
+  
+  byte payload[16];   
   //Floats
   payload[0]=highByte(intHumidity);
   payload[1]=lowByte(intHumidity);
@@ -158,14 +176,22 @@ void loop()
   payload[10]=light; //from 0 to 255
   payload[11]=highByte(battery); //voltage
   payload[12]=lowByte(battery); //
+  //Send state: sleepTime
+  payload[13]=highByte(txIntervalSleep); //voltage
+  payload[14]=lowByte(txIntervalSleep); //
+  payload[15]=inbuildLed; 
+  
+  
   
   ttn.sendBytes(payload,sizeof(payload));
  
-   //******** SLEEP THE NODE ***************//
+  //******** SLEEP THE NODE ***************//
   //Sleepin LORA module
-    ttn.sleep(TX_INTERVAL_SLEEP * 8L * 1000L);
-    Serial.print("****** SLEEPING:");
-    Serial.print(TX_INTERVAL_SLEEP*8);
+    //ttn.sleep(TX_INTERVAL_SLEEP * 8L * 1000L);
+    ttn.sleep(txIntervalSleep * 8L * 1000L);
+    Serial.print("****** SLEEPING LORA Module:");
+    //Serial.print(TX_INTERVAL_SLEEP*8);
+    Serial.print(txIntervalSleep*8);
     Serial.println(" seconds");
   //Sleeping sensors connected to POWER_PIN
     digitalWrite(POWER_PIN12,LOW);
@@ -200,6 +226,16 @@ void loop()
      }
     delay(1000);
     Serial.println("***** Just wake up! ******** ");
+
+     //After 10 times of sending the default value changes to 8*900 seconds 
+    if((!intervalSleepChanged) && (contInitialAttemps<INITIAL_ATTEMPS))
+    {
+        contInitialAttemps=contInitialAttemps +1;
+        if (contInitialAttemps==INITIAL_ATTEMPS)
+        {
+            txIntervalSleep= DEFAULT_SLEEP_TEMP; 
+          } 
+     }
   
 }
 
@@ -314,7 +350,8 @@ float getWindSpeed(){
  *  Description: Enters the arduino into sleep mode.
  ***************************************************/
 void enterSleep(){
-  for(int i=0; i<TX_INTERVAL_SLEEP; i++){
+  //for(int i=0; i<TX_INTERVAL_SLEEP; i++){
+  for(int i=0; i<txIntervalSleep; i++){
       LowPower.powerDown(SLEEP_8S,ADC_OFF,BOD_OFF);  
     }
   }
@@ -322,9 +359,29 @@ void enterSleep(){
 void enterSleepTesting(){
 
     Serial.println("***** entra en sleeping testing! ******** ");
-    long sleepInterval=TX_INTERVAL_SLEEP * 8L * 1000L;
+    //long sleepInterval=TX_INTERVAL_SLEEP * 8L * 1000L;
+    long sleepInterval=txIntervalSleep * 8L * 1000L;
     Serial.println(sleepInterval);
     delay(sleepInterval);
     Serial.println("***** end of delay! ******** ");
  }
-  
+
+ void message(const uint8_t *payload, size_t size, port_t port)
+ {
+   if(payload[0])
+   {
+      Serial.println("New sleep interval defined to: ");
+      txIntervalSleep=payload[0];
+      Serial.println(txIntervalSleep);
+   }  
+   if(payload[1]==1)
+   {
+      digitalWrite(LED_BUILTIN, HIGH);
+      inbuildLed=1;  
+   }
+   if(payload[1]==0)
+   {
+    digitalWrite(LED_BUILTIN, LOW);
+    inbuildLed=0;
+   } 
+ }

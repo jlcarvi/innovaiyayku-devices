@@ -10,34 +10,32 @@
 #include <Adafruit_BME280.h>
 #include <OneWire.h> //For external temperature sensor
 #include <DallasTemperature.h>
-//#include "Adafruit_SI1145.h"
 
 // Replace REPLACE_ME with TTN_FP_EU868 or TTN_FP_US915
 #define freqPlan TTN_FP_EU868
 TheThingsNetwork ttn(loraSerial, debugSerial, freqPlan);
-// Set your AppEUI and AppKey
 
+// Set your AppEUI and AppKey
 const char *appEui = "70B3D57ED003AAD2";
 const char *appKey = "DD4CFEBA51CFC5CC341B395FC21C0F06";
 
 #define SEALEVELPRESSURE_HPA (1013.25)
 #define PRESSURE_BASE 40000
 
-  //**** Define if the station has vis and wind sensors
+//**** Define if the station has vis and wind sensors
 #define VIS_SENSOR false
 #define WIND_SENSOR true
-
 #define VIS_SENSOR_INTERVAL 61000 //Warm up time MILI SECONDS required by the VIS sensor 
 
-/******************** STATION STATE **************************
-state:
-{
-  sleepTime:txIntervalSleep,
-  inbuildLed:0
-}
-/***** Sleeping time TXT_INTERVAL is multiplied by 8 seconds enterSleep function*/
-//Initiate state
-int txIntervalSleep= 5; //5*8**1000 ms =40 seconds
+/************************************************************************************/
+/************************ SLEEP FUNCTION PARAMETERS *********************************/
+//When turned on, the node will send data INITIAL_ATTEMPS in the initial value of sleepInterval.
+//After the INITIAL_ATTEMPS, the sleepInterval will be changed to DEFAULT_SLEEP_TEMP     
+#define INITIAL_ATTEMPS 5
+#define DEFAULT_SLEEP_TEMP 1400   //actual sleeping time=DEFAULT_SLEEP_TEMP*8 seconds
+int initialAttempsCounter=0;
+int sleepInterval=10;             //Initially the node will sleep 80 seconds
+bool intervalSleepChanged=false;
 int inbuildLed=0;
 
 //For BME280 sensor
@@ -49,8 +47,8 @@ bool statusBME=false;
 #define EXTERNAL_TEMP_3 5
 
 //********** POWER CONTROLLER PIN *************//
-int POWER_PIN = 8; //5 v
-int POWER_PIN12=9; //12V
+int POWER_5V_PIN = 8; //5 v
+int POWER_12V_PIN=9; //12V
 
 //********** EXTERNAL TEMP CONTROLLER *************//
 OneWire external_temp_1(EXTERNAL_TEMP_1);
@@ -80,21 +78,11 @@ void setup()
   loraSerial.begin(57600);
   debugSerial.begin(9600);
   //POWER SENSORS
-  pinMode(POWER_PIN,OUTPUT);
-  pinMode(POWER_PIN12,OUTPUT);
- 
-  if(WIND_SENSOR || VIS_SENSOR)
-  {
-    //Warming up VIS sensor
-    debugSerial.println("Turning on 12 volts");
-    digitalWrite(POWER_PIN12,HIGH);
-    if(VIS_SENSOR)
-    {
-      debugSerial.println("Warming up VIS optical sensor");
-      delay(VIS_SENSOR_INTERVAL); //Use this time for avoiding sleeping mode*
-    }    
-  }
-  digitalWrite(POWER_PIN,HIGH);
+  pinMode(POWER_5V_PIN,OUTPUT);
+  pinMode(POWER_12V_PIN,OUTPUT);
+
+  warming12VSensors(); 
+  digitalWrite(POWER_5V_PIN,HIGH);
   delay(2000);
   
   // INIT TTN INTERFACE
@@ -111,18 +99,13 @@ void setup()
   ttn.onMessage(message);
 
   //INIT BME SENSOR
-  // default settings
-   statusBME = bme.begin();  
-    if (!statusBME) {
-        debugSerial.println("Could not find a valid BME280 sensor, check wiring!");
-       
-    }
-    debugSerial.println("-- Default Test --");
-    debugSerial.println();
-    sensors_1.begin(); 
-    sensors_2.begin();
-    delay(1000);
-    Serial.println("OK!");
+  startBME280();
+  debugSerial.println("-- Default Test --");
+  debugSerial.println();
+  sensors_1.begin(); 
+  sensors_2.begin();
+  delay(1000);
+  Serial.println("OK!");
 }
 
 void loop()
@@ -173,8 +156,8 @@ void loop()
   payload[11]=highByte(battery); //voltage
   payload[12]=lowByte(battery); //
   //Send state: sleepTime
-  payload[13]=highByte(txIntervalSleep); //voltage
-  payload[14]=lowByte(txIntervalSleep); //
+  payload[13]=highByte(sleepInterval); //voltage
+  payload[14]=lowByte(sleepInterval); //
   payload[15]=inbuildLed; 
   
   
@@ -184,47 +167,63 @@ void loop()
   //******** SLEEP THE NODE ***************//
   //Sleepin LORA module
     //ttn.sleep(TX_INTERVAL_SLEEP * 8L * 1000L);
-    ttn.sleep(txIntervalSleep * 8L * 1000L);
+    ttn.sleep(sleepInterval * 8L * 1000L);
     Serial.print("****** SLEEPING LORA Module:");
-    //Serial.print(TX_INTERVAL_SLEEP*8);
-    Serial.print(txIntervalSleep*8);
+    Serial.print(sleepInterval*8);
     Serial.println(" seconds");
   //Sleeping sensors connected to POWER_PIN
-    digitalWrite(POWER_PIN12,LOW);
-    digitalWrite(POWER_PIN,LOW);   
+    digitalWrite(POWER_12V_PIN,LOW);
+    digitalWrite(POWER_5V_PIN,LOW);   
     delay(1000); //To let print and PINs low correctly before sleeping 
    
    //********** Going to sleep power down ********/
-   enterSleepTesting();
-   // enterSleep(); //sleep TX_INTERVAL_SLEEP*8 seconds
-    
+   //enterSleepTesting();
+   enterSleep(); //sleep TX_INTERVAL_SLEEP*8 seconds
+   
    //******** WAKING UP THE NODE ***********//
-   //Wake up VIS sensor VIS_SENSOR_INTERVAL before the whole node
+   warming12VSensors(); 
+   //Waking up LoRa module
+   ttn.wake();
+   digitalWrite(POWER_5V_PIN,HIGH);
+   delay(2000);
+   //************** Start again BME sensor//
+   startBME280();
+   Serial.println("***** Just wake up! ******** ");
+
+    /***************************************************************************/
+    /********Check if the inital attemps of sending data have finished*********/
+    if((!intervalSleepChanged) && (initialAttempsCounter < INITIAL_ATTEMPS))
+    {
+        initialAttempsCounter = initialAttempsCounter +1;
+        if (initialAttempsCounter == INITIAL_ATTEMPS)
+        {
+            sleepInterval= DEFAULT_SLEEP_TEMP; 
+         } 
+     }
+}
+/*******************WARMING UP 12V SENSORS************************/
+//Wind and optical sensors
+void warming12VSensors(){
+    //Wake up VIS sensor VIS_SENSOR_INTERVAL before the whole node
     if(WIND_SENSOR || VIS_SENSOR)
     {
       //Warming up VIS sensor
-      digitalWrite(POWER_PIN12,HIGH);
+      digitalWrite(POWER_12V_PIN,HIGH);
       if(VIS_SENSOR)
       {
         debugSerial.println("Warming up VIS optical sensor");
         delay(VIS_SENSOR_INTERVAL); //Use this time for avoiding sleeping mode*
       }
     }
-    
-    //Waking up LoRa module
-    ttn.wake();
-    digitalWrite(POWER_PIN,HIGH);
-    delay(2000);
-    //************** Start again BME sensor//
-    statusBME=bme.begin();
-    if (!statusBME) {
-        Serial.println("Could not find a valid BME280 sensor, check wiring!");
-     }
-    delay(1000);
-    Serial.println("***** Just wake up! ******** ");
-  
 }
 
+void startBME280(){
+  statusBME=bme.begin();
+  if (!statusBME) {
+      Serial.println("Could not find a valid BME280 sensor, check wiring!");
+  }
+  delay(1000);
+}
 //Get Internal sensors
 float getIntTemperature(){
   if (statusBME){
@@ -336,8 +335,7 @@ float getWindSpeed(){
  *  Description: Enters the arduino into sleep mode.
  ***************************************************/
 void enterSleep(){
-  //for(int i=0; i<TX_INTERVAL_SLEEP; i++){
-  for(int i=0; i<txIntervalSleep; i++){
+  for(int i=0; i<sleepInterval; i++){
       LowPower.powerDown(SLEEP_8S,ADC_OFF,BOD_OFF);  
     }
   }
@@ -345,21 +343,21 @@ void enterSleep(){
 void enterSleepTesting(){
 
     Serial.println("***** entra en sleeping testing! ******** ");
-    //long sleepInterval=TX_INTERVAL_SLEEP * 8L * 1000L;
-    long sleepInterval=txIntervalSleep * 8L * 1000L;
-    Serial.println(sleepInterval);
-    delay(sleepInterval);
+    long sleepIntervalTest=sleepInterval * 8L * 1000L;
+    Serial.println(sleepIntervalTest);
+    delay(sleepIntervalTest);
     Serial.println("***** end of delay! ******** ");
  }
 
  void message(const uint8_t *payload, size_t size, port_t port)
  {
    
-   if(payload[1])
+   if(payload[0])
    {
       Serial.println("New sleep interval defined to: ");
-      txIntervalSleep=payload[0];
-      Serial.println(txIntervalSleep);
+      sleepInterval=payload[0];
+      Serial.println(sleepInterval);
+      intervalSleepChanged=true;
    }  
    if(payload[1]==1)
    {
